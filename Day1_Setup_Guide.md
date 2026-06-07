@@ -206,13 +206,9 @@ chmod +x *.sh
 ./install_microros_agent.sh
 ```
 > Builds the micro-ROS agent inside the container.
-> **Takes 15–25 min on RPi 3A+, less on RPi 4. Do not exit or interrupt.**
+> **Takes time Do not exit or interrupt.**
 
 ---
-
-## ✅ Day 1 Done
-
-If Step 19 completes without errors, Day 1 installation is complete.
 
 **What is ready:**
 - Docker installed on RPi
