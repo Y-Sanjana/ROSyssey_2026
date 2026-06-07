@@ -5,9 +5,9 @@
 ---
 
 ## Prerequisites
-- Raspberry Pi (RPi 3A+/4) with Raspberry Pi OS 64-bit flashed and SSH enabled
+- Raspberry Pi (RPi 3A+) with Raspberry Pi OS 64-bit flashed and SSH enabled
 - RPi and Laptop on the **same WiFi network**
-- Laptop terminal (Ubuntu/Mac: native terminal | Windows: PowerShell or Windows Terminal)
+- Laptop terminal (Windows: PowerShell or Windows Terminal)
 
 ---
 
