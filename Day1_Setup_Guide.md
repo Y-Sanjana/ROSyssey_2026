@@ -216,8 +216,6 @@ chmod +x *.sh
 - micro-ROS agent built inside the container
 - micro-ROS agent image pulled (`microros/micro-ros-agent:humble`)
 
-**Day 2 starts from:** ESP32 setup → flash rover sketch → run agent → teleop the bot.
-
 ---
 
 ## Troubleshooting
