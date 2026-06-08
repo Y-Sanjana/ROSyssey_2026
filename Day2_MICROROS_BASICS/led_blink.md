@@ -70,13 +70,15 @@ sudo usermod -a -G dialout $USER
 ## Step 3 — Install the micro_ros_arduino Library
 
 Clone the prebuilt library directly into your Arduino libraries folder 
+The Arduino IDE and the micro_ros_arduino library have no connection to your host ROS installation whatsoever, hence fine to run in UBuntu 24 versions too
 
 ```bash
 # Navigate to your Arduino libraries directory
 cd ~/Arduino/libraries
 
-# Clone the micro-ROS Arduino library (Humble branch)
-git clone --branch humble https://github.com/micro-ROS/micro_ros_arduino.git
+# Clone the micro-ROS Arduino library (Humble branch), execute the same command for Ubuntu 24 vresion too (dont replace humble with jazzy), since Rpi docker runs ros2 humble, these are just packages installed in arduino ide 
+
+git clone --branch humble https://github.com/micro-ROS/micro_ros_arduino.git   
 ```
 
 After cloning:
