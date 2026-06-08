@@ -19,6 +19,8 @@
 | 📦 | Inside Docker container |
 
 ---
+## PART 0 - ROS2 INSTALLATION ON UBUNTU
+https://docs.ros.org/en/humble/Installation/Ubuntu-Install-Debs.html#resources
 
 ## PART 1 — RPi OS Setup
 
