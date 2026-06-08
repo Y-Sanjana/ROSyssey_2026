@@ -28,7 +28,7 @@ https://docs.ros.org/en/humble/Installation/Ubuntu-Install-Debs.html#resources
 
 ### Step 1: SSH into the Raspberry Pi
 ```bash
-ssh username@hostname.local
+ssh astra<team_no>@raspi.local
 # or
 ssh username@ip_address
 ```
