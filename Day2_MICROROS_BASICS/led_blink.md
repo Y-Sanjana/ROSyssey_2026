@@ -76,8 +76,8 @@ The Arduino IDE and the micro_ros_arduino library have no connection to your hos
 # Navigate to your Arduino libraries directory
 cd ~/Arduino/libraries
 
-# Clone the micro-ROS Arduino library (Humble branch), execute the same command for Ubuntu 24 vresion too (dont replace humble with jazzy), since Rpi docker runs ros2 humble, these are just packages installed in arduino ide 
-
+ execute the same command for Ubuntu 24 vresion too (dont replace humble with jazzy), since Rpi docker runs ros2 humble, these are just packages installed in arduino ide 
+# Clone the micro-ROS Arduino library (Humble branch)
 git clone --branch humble https://github.com/micro-ROS/micro_ros_arduino.git   
 ```
 
