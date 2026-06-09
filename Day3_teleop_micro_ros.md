@@ -1,37 +1,325 @@
-ESP32 Teleop Node — teleop_code.ino
-micro-ROS node on ESP32. Subscribes to /cmd_vel over WiFi UDP and drives a differential-drive rover via DRV8833.
+# ESP32 Teleop Node — `teleop_code.ino`
 
-Hardware
-ComponentGPIORight Motor IN125Right Motor IN226Left Motor IN127Left Motor IN214Left Encoder A (ISR)27Left Encoder B (DIR)26Right Encoder A (ISR)25Right Encoder B (DIR)33MPU-6050 SDA13MPU-6050 SCL14
+micro-ROS node on ESP32. Subscribes to `/cmd_vel` over WiFi UDP and drives a differential-drive rover via DRV8833.
 
-⚠️ Pin conflicts exist in this version — GPIO 25/26/27 are shared between motor driver and encoders, and GPIO 14 is shared between LEFT_IN2 and SCL. Fix before deploying.
+---
+
+## Hardware
+
+| Component | GPIO |
+|---|---|
+| Right Motor IN1 | 25 |
+| Right Motor IN2 | 26 |
+| Left Motor IN1 | 27 |
+| Left Motor IN2 | 14 |
+| Left Encoder A (ISR) | 27 |
+| Left Encoder B (DIR) | 26 |
+| Right Encoder A (ISR) | 25 |
+| Right Encoder B (DIR) | 33 |
+| MPU-6050 SDA | 13 |
+| MPU-6050 SCL | 14 |
+
+> ⚠️ **Pin conflicts exist in this version** — GPIO 25/26/27 are shared between motor driver and encoders, and GPIO 14 is shared between LEFT_IN2 and SCL. Fix before deploying.
+
+---
+
+## Step 0 — Edit credentials before flashing
+
+Open `teleop_code.ino` and update these three lines:
+
+```cpp
+#include <micro_ros_arduino.h>
+#include <rcl/rcl.h>
+#include <rclc/rclc.h>
+#include <rclc/executor.h>
+#include <geometry_msgs/msg/twist.h>
+#include <Wire.h>
+
+// ─────────────────────────────────────────
+// PIN CONFIGURATION
+// ─────────────────────────────────────────
+
+// DRV8833: IN1,IN2 → Right motor
+#define RIGHT_IN1   25    // D21
+#define RIGHT_IN2   26    // D19
+
+// DRV8833: IN3,IN4 → Left motor
+#define LEFT_IN1    27    // D4
+#define LEFT_IN2    14    // D2
+
+// Left Encoder
+#define LEFT_ENC_A  27    // D27 (C1) — interrupt
+#define LEFT_ENC_B  26    // D26 (C2) — direction
+
+// Right Encoder
+#define RIGHT_ENC_A 25    // D25 (C1) — interrupt
+#define RIGHT_ENC_B 33    // D33 (C2) — direction
+
+// I2C MPU6050
+#define SDA_PIN     13    // D13
+#define SCL_PIN     14    // D14
+
+// ─────────────────────────────────────────
+// WiFi credentials for micro-ROS agent
+// ─────────────────────────────────────────
+#define WIFI_SSID   "astra8"      // ← CHANGE
+#define WIFI_PASS   "12345678"  // ← CHANGE
+#define AGENT_IP    ""       // ← CHANGE to your PC IP
+#define AGENT_PORT  8888
+
+// ─────────────────────────────────────────
+// LEDC PWM  (v3 API — no ledcSetup)
+// ─────────────────────────────────────────
+#define LEFT_CH     0
+#define RIGHT_CH    1
+#define PWM_FREQ    1000
+#define PWM_RES     10    // 10-bit → 0–1023
+
+// MPU6050
+#define MPU_ADDR    0x68
+
+// Drive params
+#define WHEELBASE   0.16
+#define VEL_SCALE   800.0
+
+// ─────────────────────────────────────────
+// GLOBALS
+// ─────────────────────────────────────────
+volatile int32_t left_count  = 0;
+volatile int32_t right_count = 0;
+
+float linear_x_cmd  = 0.0;
+float angular_z_cmd = 0.0;
+
+rcl_node_t         node;
+rcl_subscription_t sub;
+rclc_executor_t    executor;
+rclc_support_t     support;
+rcl_allocator_t    allocator;
+geometry_msgs__msg__Twist twist_msg;
+
+int16_t AccX, AccY, AccZ;
+int16_t GyroX, GyroY, GyroZ;
+float   Ax, Ay, Az;
+float   Gx, Gy, Gz;
+float   angleX, angleY;
+
+// ─────────────────────────────────────────
+// ENCODER ISRs
+// ─────────────────────────────────────────
+void IRAM_ATTR leftEncoderISR() {
+    if (digitalRead(LEFT_ENC_B))  left_count++;
+    else                          left_count--;
+}
+
+void IRAM_ATTR rightEncoderISR() {
+    if (digitalRead(RIGHT_ENC_B)) right_count++;
+    else                          right_count--;
+}
+
+// ─────────────────────────────────────────
+// MOTOR FUNCTIONS  (v3 API: ledcAttach with 3 args)
+// ─────────────────────────────────────────
+void Motor_Left(int speed) {
+    speed = constrain(speed, -1023, 1023);
+    if (speed > 0) {
+        ledcAttach(LEFT_IN1, PWM_FREQ, PWM_RES);  // PWM on D4
+        ledcWrite(LEFT_IN1, speed);
+        digitalWrite(LEFT_IN2, LOW);               // D2 = LOW
+    } else if (speed < 0) {
+        ledcAttach(LEFT_IN2, PWM_FREQ, PWM_RES);  // PWM on D2
+        ledcWrite(LEFT_IN2, -speed);
+        digitalWrite(LEFT_IN1, LOW);               // D4 = LOW
+    } else {
+        ledcDetach(LEFT_IN1);
+        ledcDetach(LEFT_IN2);
+        digitalWrite(LEFT_IN1, LOW);
+        digitalWrite(LEFT_IN2, LOW);               // coast
+    }
+}
+
+void Motor_Right(int speed) {
+    speed = constrain(speed, -1023, 1023);
+    if (speed > 0) {
+        ledcAttach(RIGHT_IN1, PWM_FREQ, PWM_RES); // PWM on D21
+        ledcWrite(RIGHT_IN1, speed);
+        digitalWrite(RIGHT_IN2, LOW);              // D19 = LOW
+    } else if (speed < 0) {
+        ledcAttach(RIGHT_IN2, PWM_FREQ, PWM_RES); // PWM on D19
+        ledcWrite(RIGHT_IN2, -speed);
+        digitalWrite(RIGHT_IN1, LOW);              // D21 = LOW
+    } else {
+        ledcDetach(RIGHT_IN1);
+        ledcDetach(RIGHT_IN2);
+        digitalWrite(RIGHT_IN1, LOW);
+        digitalWrite(RIGHT_IN2, LOW);              // coast
+    }
+}
+
+void Motor_Stop() {
+    ledcDetach(LEFT_IN1);
+    ledcDetach(LEFT_IN2);
+    ledcDetach(RIGHT_IN1);
+    ledcDetach(RIGHT_IN2);
+    digitalWrite(LEFT_IN1,  HIGH);  // D4  — brake
+    digitalWrite(LEFT_IN2,  HIGH);  // D2
+    digitalWrite(RIGHT_IN1, HIGH);  // D21
+    digitalWrite(RIGHT_IN2, HIGH);  // D19
+}
+
+// ─────────────────────────────────────────
+// CMD_VEL CALLBACK
+// ─────────────────────────────────────────
+void twist_callback(const void* msg_in) {
+    const geometry_msgs__msg__Twist* msg =
+        (const geometry_msgs__msg__Twist*)msg_in;
+
+    linear_x_cmd  = msg->linear.x;
+    angular_z_cmd = msg->angular.z;
+
+    float v_left  = linear_x_cmd - (angular_z_cmd * WHEELBASE / 2.0);
+    float v_right = linear_x_cmd + (angular_z_cmd * WHEELBASE / 2.0);
+
+    Motor_Left ((int)(v_left  * VEL_SCALE));
+    Motor_Right((int)(v_right * VEL_SCALE));
+}
+
+// ─────────────────────────────────────────
+// MPU6050
+// ─────────────────────────────────────────
+void MPU6050_Init() {
+    Wire.beginTransmission(MPU_ADDR);
+    Wire.write(0x6B);
+    Wire.write(0x00);
+    Wire.endTransmission();
+}
+
+void MPU6050_Read() {
+    Wire.beginTransmission(MPU_ADDR);
+    Wire.write(0x3B);
+    Wire.endTransmission(false);
+    Wire.requestFrom(MPU_ADDR, 14, true);
+
+    AccX  = Wire.read() << 8 | Wire.read();
+    AccY  = Wire.read() << 8 | Wire.read();
+    AccZ  = Wire.read() << 8 | Wire.read();
+    Wire.read(); Wire.read();               // skip temp
+    GyroX = Wire.read() << 8 | Wire.read();
+    GyroY = Wire.read() << 8 | Wire.read();
+    GyroZ = Wire.read() << 8 | Wire.read();
+}
+
+void MPU6050_Convert() {
+    Ax = AccX  / 16384.0;
+    Ay = AccY  / 16384.0;
+    Az = AccZ  / 16384.0;
+    Gx = GyroX / 131.0;
+    Gy = GyroY / 131.0;
+    Gz = GyroZ / 131.0;
+}
+
+void MPU6050_Angle() {
+    angleX = atan2(Ay, Az) * 57.3;
+    angleY = atan2(Ax, Az) * 57.3;
+}
+
+// ─────────────────────────────────────────
+// SETUP
+// ─────────────────────────────────────────
+void setup() {
+    Serial.begin(115200);
+
+    // micro-ROS over WiFi
+    set_microros_wifi_transports(WIFI_SSID, WIFI_PASS, AGENT_IP, AGENT_PORT);
+    delay(2000);
+
+    // Motor pins
+    pinMode(LEFT_IN1,  OUTPUT);  // D4
+    pinMode(LEFT_IN2,  OUTPUT);  // D2
+    pinMode(RIGHT_IN1, OUTPUT);  // D21
+    pinMode(RIGHT_IN2, OUTPUT);  // D19
+    Motor_Stop();
+
+    // Encoder interrupts
+    pinMode(LEFT_ENC_A,  INPUT_PULLUP);  // D27
+    pinMode(LEFT_ENC_B,  INPUT_PULLUP);  // D26
+    pinMode(RIGHT_ENC_A, INPUT_PULLUP);  // D25
+    pinMode(RIGHT_ENC_B, INPUT_PULLUP);  // D33
+    attachInterrupt(digitalPinToInterrupt(LEFT_ENC_A),  leftEncoderISR,  RISING);
+    attachInterrupt(digitalPinToInterrupt(RIGHT_ENC_A), rightEncoderISR, RISING);
+
+    // I2C + MPU6050
+    Wire.begin(SDA_PIN, SCL_PIN);   // D13, D14
+    MPU6050_Init();
+
+    // micro-ROS init
+    allocator = rcl_get_default_allocator();
+    rclc_support_init(&support, 0, NULL, &allocator);
+    rclc_node_init_default(&node, "esp32_teleop", "", &support);
+
+    rclc_subscription_init_default(
+        &sub, &node,
+        ROSIDL_GET_MSG_TYPE_SUPPORT(geometry_msgs, msg, Twist),
+        "/cmd_vel"
+    );
+
+    rclc_executor_init(&executor, &support.context, 1, &allocator);
+    rclc_executor_add_subscription(
+        &executor, &sub, &twist_msg, &twist_callback, ON_NEW_DATA
+    );
+}
+
+// ─────────────────────────────────────────
+// LOOP
+// ─────────────────────────────────────────
+void loop() {
+    MPU6050_Read();
+    MPU6050_Convert();
+    MPU6050_Angle();
+
+    rclc_executor_spin_some(&executor, RCL_MS_TO_NS(10));
+    delay(90);
+}
+```
+
+---
 
 
-Step 0 — Edit credentials before flashing
-Open teleop_code.ino and update these three lines:
-cpp#define WIFI_SSID   "your_wifi_name"
-#define WIFI_PASS   "your_wifi_pass"
-#define AGENT_IP    "192.168.x.x"      // IP of the RPi running micro-ROS agent
+## Step 2 — Terminal 1 — micro-ROS Agent
 
-Step 2 — Terminal 1 — micro-ROS Agent
-bashssh astra8@raspi.local
+```bash
+ssh astra8@raspi.local
 sudo docker start ros2_humble
 docker run -it --rm --network host --privileged \
   microros/micro-ros-agent:humble udp4 --port 8888
-→ Press EN on ESP32
-→ Wait for session_established in the agent log
+```
 
-Step 3 — Terminal 2 — Teleop keyboard
-Open a new terminal (keep Terminal 1 running):
-bashssh astra8@raspi.local
+→ Press **EN** on ESP32  
+→ Wait for `session_established` in the agent log
+
+---
+
+## Step 3 — Terminal 2 — Teleop keyboard
+
+Open a **new terminal** (keep Terminal 1 running):
+
+```bash
+ssh astra8@raspi.local
 sudo docker exec -it ros2_humble bash
 source /opt/ros/humble/setup.bash
 ros2 run teleop_twist_keyboard teleop_twist_keyboard
-Use i / , to go forward/back, j / l to turn, k to stop.
+```
 
-One-shot test (inside ros2_humble container, optional)
+Use `i` / `,` to go forward/back, `j` / `l` to turn, `k` to stop.
+
+---
+
+## One-shot test (inside ros2_humble container, optional)
+
 If you want to verify the topic before running teleop:
-bash# check ESP32 node is visible
+
+```bash
+# check ESP32 node is visible
 ros2 node list
 
 # check /cmd_vel exists
@@ -44,20 +332,41 @@ ros2 topic pub --once /cmd_vel geometry_msgs/msg/Twist \
 # stop
 ros2 topic pub --once /cmd_vel geometry_msgs/msg/Twist \
   "{linear: {x: 0.0, y: 0.0, z: 0.0}, angular: {x: 0.0, y: 0.0, z: 0.0}}"
+```
 
-Monitor serial (optional debug)
-bash# Linux
+---
+
+## Monitor serial (optional debug)
+
+```bash
+# Linux
 screen /dev/ttyUSB0 115200
 
 # or
 python3 -m serial.tools.miniterm /dev/ttyUSB0 115200
+```
 
-Known issues in this version
-IssueFixGPIO 25/26/27 shared between motors and encodersRemap encoder pinsGPIO 14 shared between LEFT_IN2 and MPU SCLRemap SCL to GPIO 22AGENT_IP is blank by defaultFill in before flashEncoder counts not publishedAdd /odom publisherIMU data read but not publishedAdd /imu publisher
+---
 
-Extended Version — teleop_full.ino
-Adds watchdog safety stop, PID closed-loop velocity control, /odom publisher, and /joint_states publisher on top of the basic teleop.
-Flow (runs at 20 Hz)
+## Known issues in this version
+
+| Issue | Fix |
+|---|---|
+| GPIO 25/26/27 shared between motors and encoders | Remap encoder pins |
+| GPIO 14 shared between LEFT_IN2 and MPU SCL | Remap SCL to GPIO 22 |
+| `AGENT_IP` is blank by default | Fill in before flash |
+| Encoder counts not published | Add `/odom` publisher |
+| IMU data read but not published | Add `/imu` publisher |
+
+---
+
+## Extended Version — `teleop_full.ino`
+
+Adds **watchdog safety stop**, **PID closed-loop velocity control**, **`/odom` publisher**, and **`/joint_states` publisher** on top of the basic teleop.
+
+### Flow (runs at 20 Hz)
+
+```
        /cmd_vel ──► callback ──► target_left_w, target_right_w
                                           │
    ┌──────────────────────────────────────┼──────────────────────────┐
@@ -74,15 +383,31 @@ Flow (runs at 20 Hz)
    │      ▼                                                           │
    │   publish /joint_states                                         │
    └──────────────────────────────────────────────────────────────────┘
-Tune before first run
-ParamWhereHowTICKS_PER_REVtop of fileSpin wheel one full rotation by hand, read left_count diffKP / KI / KDtop of fileStart KP only → increase till oscillation → back off 50% → add KI / KDAGENT_IPWiFi blockRPi IPEncoder pinsremapped to 32–35 to avoid motor pin clashverify wiring
-Verify after flash
-bashros2 topic list           # /cmd_vel /odom /joint_states
+```
+
+### Tune before first run
+
+| Param | Where | How |
+|---|---|---|
+| `TICKS_PER_REV` | top of file | Spin wheel one full rotation by hand, read `left_count` diff |
+| `KP / KI / KD` | top of file | Start KP only → increase till oscillation → back off 50% → add KI / KD |
+| `AGENT_IP` | WiFi block | RPi IP |
+| Encoder pins | remapped to 32–35 to avoid motor pin clash | verify wiring |
+
+### Verify after flash
+
+```bash
+ros2 topic list           # /cmd_vel /odom /joint_states
 ros2 topic echo /odom     # pose updates when you push the rover
 ros2 topic hz /odom       # ~20 Hz
-Push the rover by hand (motors off) → /odom x/y should change. That's your encoder sanity check.
-Full code
-cpp// ═══════════════════════════════════════════════════════════════
+```
+
+Push the rover by hand (motors off) → `/odom` x/y should change. That's your encoder sanity check.
+
+### Full code
+
+```cpp
+// ═══════════════════════════════════════════════════════════════
 //  ESP32 micro-ROS Differential Drive Rover — FULL VERSION
 //  Subscribes: /cmd_vel
 //  Publishes : /odom, /joint_states
@@ -386,5 +711,8 @@ void loop() {
     joint_vel[1] = right_w_meas;
     rcl_publish(&joint_pub, &joint_msg, NULL);
 }
-Note on header timestamps
-The code above doesn't fill odom_msg.header.stamp — RViz will warn but topic still publishes fine. For production, sync time with the agent and set the stamp. Fine for workshop / bench testing.
+```
+
+### Note on header timestamps
+
+The code above doesn't fill `odom_msg.header.stamp` — RViz will warn but topic still publishes fine. For production, sync time with the agent and set the stamp. Fine for workshop / bench testing.
