@@ -1,4 +1,4 @@
-# ESP32 Teleop Node — `teleop_code.ino`
+# ESP32 Teleop Node
 
 micro-ROS node on ESP32. Subscribes to `/cmd_vel` over WiFi UDP and drives a differential-drive rover via DRV8833.
 
