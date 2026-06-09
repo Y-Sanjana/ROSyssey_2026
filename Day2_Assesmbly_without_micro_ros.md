@@ -140,9 +140,6 @@ void spin_and_wait(int pwm_A, int pwm_B, int duration)
 ```
 
 **Pin Configuration**
-
-![DRV8833 Pinout](drv8833_pinout.jpeg)
-
 | Signal | GPIO |
 |--------|------|
 | Motor A IN1 | 25 |
@@ -194,9 +191,6 @@ void loop() {
 ```
 
 **Pin Configuration**
-
-![ESP32 WROOM32 Pinout](esp32_pinout.jpeg)
-
 | Signal | GPIO |
 |--------|------|
 | Left Encoder A (interrupt) | 32 |
@@ -388,9 +382,6 @@ void loop() {
 ```
 
 **Pin Configuration**
-
-![Full Wiring Diagram](wiring_diagram.jpeg)
-
 | Signal | GPIO |
 |--------|------|
 | Motor A IN1 | 25 |
@@ -662,9 +653,6 @@ void loop() {
 ```
 
 **Pin Configuration**
-
-![Full Wiring Diagram](wiring_diagram.jpeg)
-
 | Signal | GPIO |
 |--------|------|
 | Motor A IN1 | 25 |
