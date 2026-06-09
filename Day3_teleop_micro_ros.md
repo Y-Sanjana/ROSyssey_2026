@@ -1,0 +1,390 @@
+ESP32 Teleop Node — teleop_code.ino
+micro-ROS node on ESP32. Subscribes to /cmd_vel over WiFi UDP and drives a differential-drive rover via DRV8833.
+
+Hardware
+ComponentGPIORight Motor IN125Right Motor IN226Left Motor IN127Left Motor IN214Left Encoder A (ISR)27Left Encoder B (DIR)26Right Encoder A (ISR)25Right Encoder B (DIR)33MPU-6050 SDA13MPU-6050 SCL14
+
+⚠️ Pin conflicts exist in this version — GPIO 25/26/27 are shared between motor driver and encoders, and GPIO 14 is shared between LEFT_IN2 and SCL. Fix before deploying.
+
+
+Step 0 — Edit credentials before flashing
+Open teleop_code.ino and update these three lines:
+cpp#define WIFI_SSID   "your_wifi_name"
+#define WIFI_PASS   "your_wifi_pass"
+#define AGENT_IP    "192.168.x.x"      // IP of the RPi running micro-ROS agent
+
+Step 2 — Terminal 1 — micro-ROS Agent
+bashssh astra8@raspi.local
+sudo docker start ros2_humble
+docker run -it --rm --network host --privileged \
+  microros/micro-ros-agent:humble udp4 --port 8888
+→ Press EN on ESP32
+→ Wait for session_established in the agent log
+
+Step 3 — Terminal 2 — Teleop keyboard
+Open a new terminal (keep Terminal 1 running):
+bashssh astra8@raspi.local
+sudo docker exec -it ros2_humble bash
+source /opt/ros/humble/setup.bash
+ros2 run teleop_twist_keyboard teleop_twist_keyboard
+Use i / , to go forward/back, j / l to turn, k to stop.
+
+One-shot test (inside ros2_humble container, optional)
+If you want to verify the topic before running teleop:
+bash# check ESP32 node is visible
+ros2 node list
+
+# check /cmd_vel exists
+ros2 topic list
+
+# send a single forward command
+ros2 topic pub --once /cmd_vel geometry_msgs/msg/Twist \
+  "{linear: {x: 0.2, y: 0.0, z: 0.0}, angular: {x: 0.0, y: 0.0, z: 0.0}}"
+
+# stop
+ros2 topic pub --once /cmd_vel geometry_msgs/msg/Twist \
+  "{linear: {x: 0.0, y: 0.0, z: 0.0}, angular: {x: 0.0, y: 0.0, z: 0.0}}"
+
+Monitor serial (optional debug)
+bash# Linux
+screen /dev/ttyUSB0 115200
+
+# or
+python3 -m serial.tools.miniterm /dev/ttyUSB0 115200
+
+Known issues in this version
+IssueFixGPIO 25/26/27 shared between motors and encodersRemap encoder pinsGPIO 14 shared between LEFT_IN2 and MPU SCLRemap SCL to GPIO 22AGENT_IP is blank by defaultFill in before flashEncoder counts not publishedAdd /odom publisherIMU data read but not publishedAdd /imu publisher
+
+Extended Version — teleop_full.ino
+Adds watchdog safety stop, PID closed-loop velocity control, /odom publisher, and /joint_states publisher on top of the basic teleop.
+Flow (runs at 20 Hz)
+       /cmd_vel ──► callback ──► target_left_w, target_right_w
+                                          │
+   ┌──────────────────────────────────────┼──────────────────────────┐
+   │                          (every loop tick)                       │
+   │   Watchdog: no cmd for 500ms? → targets = 0                     │
+   │      ▼                                                           │
+   │   Read encoder counts → measured wheel rad/s                    │
+   │      ▼                                                           │
+   │   PID: error = target - measured → PWM                          │
+   │      ▼                                                           │
+   │   Motor_Left() / Motor_Right()                                  │
+   │      ▼                                                           │
+   │   update_odom() → publish /odom                                 │
+   │      ▼                                                           │
+   │   publish /joint_states                                         │
+   └──────────────────────────────────────────────────────────────────┘
+Tune before first run
+ParamWhereHowTICKS_PER_REVtop of fileSpin wheel one full rotation by hand, read left_count diffKP / KI / KDtop of fileStart KP only → increase till oscillation → back off 50% → add KI / KDAGENT_IPWiFi blockRPi IPEncoder pinsremapped to 32–35 to avoid motor pin clashverify wiring
+Verify after flash
+bashros2 topic list           # /cmd_vel /odom /joint_states
+ros2 topic echo /odom     # pose updates when you push the rover
+ros2 topic hz /odom       # ~20 Hz
+Push the rover by hand (motors off) → /odom x/y should change. That's your encoder sanity check.
+Full code
+cpp// ═══════════════════════════════════════════════════════════════
+//  ESP32 micro-ROS Differential Drive Rover — FULL VERSION
+//  Subscribes: /cmd_vel
+//  Publishes : /odom, /joint_states
+//  Features  : Watchdog safety stop, PID closed-loop velocity
+// ═══════════════════════════════════════════════════════════════
+
+#include <micro_ros_arduino.h>
+#include <rcl/rcl.h>
+#include <rclc/rclc.h>
+#include <rclc/executor.h>
+#include <geometry_msgs/msg/twist.h>
+#include <nav_msgs/msg/odometry.h>
+#include <sensor_msgs/msg/joint_state.h>
+#include <rosidl_runtime_c/string_functions.h>
+
+// ─────────────────────────────────────────
+// PIN CONFIG  (⚠️ fix conflicts before deploying)
+// ─────────────────────────────────────────
+#define RIGHT_IN1   25
+#define RIGHT_IN2   26
+#define LEFT_IN1    27
+#define LEFT_IN2    14
+
+#define LEFT_ENC_A  34   // ← remapped to avoid clash with motor pins
+#define LEFT_ENC_B  35
+#define RIGHT_ENC_A 32
+#define RIGHT_ENC_B 33
+
+// ─────────────────────────────────────────
+// WiFi
+// ─────────────────────────────────────────
+#define WIFI_SSID   "astra8"
+#define WIFI_PASS   "12345678"
+#define AGENT_IP    "192.168.1.100"    // ← RPi IP
+#define AGENT_PORT  8888
+
+// ─────────────────────────────────────────
+// PWM (LEDC v3 API)
+// ─────────────────────────────────────────
+#define PWM_FREQ    1000
+#define PWM_RES     10        // 0–1023
+
+// ─────────────────────────────────────────
+// ROBOT PARAMS
+// ─────────────────────────────────────────
+#define WHEEL_RADIUS   0.0325f    // metres  (65 mm wheel)
+#define WHEELBASE      0.16f      // metres
+#define TICKS_PER_REV  840.0f     // N20 298:1 with quadrature (verify yours)
+
+// PID gains (tune these)
+#define KP   200.0f
+#define KI    50.0f
+#define KD     5.0f
+
+// Watchdog — stop if no /cmd_vel for this long (ms)
+#define CMD_TIMEOUT_MS 500
+
+// Loop period (ms)
+#define LOOP_DT_MS 50            // 20 Hz control loop
+
+// ─────────────────────────────────────────
+// GLOBALS
+// ─────────────────────────────────────────
+volatile int32_t left_count  = 0;
+volatile int32_t right_count = 0;
+int32_t  left_count_prev  = 0;
+int32_t  right_count_prev = 0;
+
+// Velocity command from /cmd_vel (target wheel velocities in rad/s)
+float target_left_w  = 0.0f;
+float target_right_w = 0.0f;
+
+// PID state
+float left_integral  = 0.0f, left_prev_err  = 0.0f;
+float right_integral = 0.0f, right_prev_err = 0.0f;
+
+// Odometry pose
+float pose_x = 0.0f, pose_y = 0.0f, pose_th = 0.0f;
+
+// Timing
+unsigned long last_cmd_ms = 0;
+unsigned long last_loop_ms = 0;
+
+// micro-ROS handles
+rcl_node_t          node;
+rcl_subscription_t  cmd_sub;
+rcl_publisher_t     odom_pub;
+rcl_publisher_t     joint_pub;
+rclc_executor_t     executor;
+rclc_support_t      support;
+rcl_allocator_t     allocator;
+
+geometry_msgs__msg__Twist     twist_msg;
+nav_msgs__msg__Odometry       odom_msg;
+sensor_msgs__msg__JointState  joint_msg;
+
+// JointState needs string arrays + double arrays — allocate statically
+double joint_pos[2] = {0.0, 0.0};
+double joint_vel[2] = {0.0, 0.0};
+rosidl_runtime_c__String joint_names[2];
+
+// ─────────────────────────────────────────
+// ENCODER ISRs
+// ─────────────────────────────────────────
+void IRAM_ATTR leftEncoderISR()  {
+    if (digitalRead(LEFT_ENC_B))  left_count++;  else left_count--;
+}
+void IRAM_ATTR rightEncoderISR() {
+    if (digitalRead(RIGHT_ENC_B)) right_count++; else right_count--;
+}
+
+// ─────────────────────────────────────────
+// MOTOR DRIVE
+// ─────────────────────────────────────────
+void Motor_Left(int pwm) {
+    pwm = constrain(pwm, -1023, 1023);
+    if (pwm > 0)      { ledcAttach(LEFT_IN1, PWM_FREQ, PWM_RES); ledcWrite(LEFT_IN1, pwm);  digitalWrite(LEFT_IN2, LOW); }
+    else if (pwm < 0) { ledcAttach(LEFT_IN2, PWM_FREQ, PWM_RES); ledcWrite(LEFT_IN2, -pwm); digitalWrite(LEFT_IN1, LOW); }
+    else              { ledcDetach(LEFT_IN1); ledcDetach(LEFT_IN2);
+                        digitalWrite(LEFT_IN1, LOW); digitalWrite(LEFT_IN2, LOW); }
+}
+void Motor_Right(int pwm) {
+    pwm = constrain(pwm, -1023, 1023);
+    if (pwm > 0)      { ledcAttach(RIGHT_IN1, PWM_FREQ, PWM_RES); ledcWrite(RIGHT_IN1, pwm);  digitalWrite(RIGHT_IN2, LOW); }
+    else if (pwm < 0) { ledcAttach(RIGHT_IN2, PWM_FREQ, PWM_RES); ledcWrite(RIGHT_IN2, -pwm); digitalWrite(RIGHT_IN1, LOW); }
+    else              { ledcDetach(RIGHT_IN1); ledcDetach(RIGHT_IN2);
+                        digitalWrite(RIGHT_IN1, LOW); digitalWrite(RIGHT_IN2, LOW); }
+}
+void Motor_Stop() {
+    Motor_Left(0); Motor_Right(0);
+}
+
+// ─────────────────────────────────────────
+// /cmd_vel CALLBACK
+//   Converts (linear, angular) → target wheel angular velocities
+// ─────────────────────────────────────────
+void twist_callback(const void* msg_in) {
+    const geometry_msgs__msg__Twist* msg = (const geometry_msgs__msg__Twist*)msg_in;
+
+    float v = msg->linear.x;       // m/s
+    float w = msg->angular.z;      // rad/s
+
+    // Differential drive kinematics
+    float v_left  = v - (w * WHEELBASE / 2.0f);
+    float v_right = v + (w * WHEELBASE / 2.0f);
+
+    // Convert m/s → wheel rad/s
+    target_left_w  = v_left  / WHEEL_RADIUS;
+    target_right_w = v_right / WHEEL_RADIUS;
+
+    last_cmd_ms = millis();        // pet the watchdog
+}
+
+// ─────────────────────────────────────────
+// PID — returns PWM for one wheel
+// ─────────────────────────────────────────
+int pid_step(float target_w, float measured_w,
+             float &integral, float &prev_err, float dt) {
+    float err = target_w - measured_w;
+    integral += err * dt;
+    integral = constrain(integral, -5.0f, 5.0f);   // anti-windup
+    float deriv = (err - prev_err) / dt;
+    prev_err = err;
+
+    float out = KP * err + KI * integral + KD * deriv;
+    return (int)constrain(out, -1023.0f, 1023.0f);
+}
+
+// ─────────────────────────────────────────
+// ODOMETRY UPDATE
+// ─────────────────────────────────────────
+void update_odom(float left_w, float right_w, float dt) {
+    float v_left  = left_w  * WHEEL_RADIUS;
+    float v_right = right_w * WHEEL_RADIUS;
+    float v = (v_left + v_right) / 2.0f;
+    float w = (v_right - v_left) / WHEELBASE;
+
+    pose_th += w * dt;
+    pose_x  += v * cosf(pose_th) * dt;
+    pose_y  += v * sinf(pose_th) * dt;
+
+    // Fill odom message
+    odom_msg.pose.pose.position.x = pose_x;
+    odom_msg.pose.pose.position.y = pose_y;
+    odom_msg.pose.pose.position.z = 0.0;
+    // Quaternion from yaw
+    odom_msg.pose.pose.orientation.z = sinf(pose_th / 2.0f);
+    odom_msg.pose.pose.orientation.w = cosf(pose_th / 2.0f);
+    odom_msg.twist.twist.linear.x  = v;
+    odom_msg.twist.twist.angular.z = w;
+}
+
+// ─────────────────────────────────────────
+// SETUP
+// ─────────────────────────────────────────
+void setup() {
+    Serial.begin(115200);
+
+    set_microros_wifi_transports(WIFI_SSID, WIFI_PASS, AGENT_IP, AGENT_PORT);
+    delay(2000);
+
+    // Motor pins
+    pinMode(LEFT_IN1,  OUTPUT); pinMode(LEFT_IN2,  OUTPUT);
+    pinMode(RIGHT_IN1, OUTPUT); pinMode(RIGHT_IN2, OUTPUT);
+    Motor_Stop();
+
+    // Encoder pins + ISRs
+    pinMode(LEFT_ENC_A,  INPUT_PULLUP); pinMode(LEFT_ENC_B,  INPUT_PULLUP);
+    pinMode(RIGHT_ENC_A, INPUT_PULLUP); pinMode(RIGHT_ENC_B, INPUT_PULLUP);
+    attachInterrupt(digitalPinToInterrupt(LEFT_ENC_A),  leftEncoderISR,  RISING);
+    attachInterrupt(digitalPinToInterrupt(RIGHT_ENC_A), rightEncoderISR, RISING);
+
+    // micro-ROS init
+    allocator = rcl_get_default_allocator();
+    rclc_support_init(&support, 0, NULL, &allocator);
+    rclc_node_init_default(&node, "esp32_rover", "", &support);
+
+    // Subscriber
+    rclc_subscription_init_default(&cmd_sub, &node,
+        ROSIDL_GET_MSG_TYPE_SUPPORT(geometry_msgs, msg, Twist), "/cmd_vel");
+
+    // Publishers
+    rclc_publisher_init_default(&odom_pub, &node,
+        ROSIDL_GET_MSG_TYPE_SUPPORT(nav_msgs, msg, Odometry), "/odom");
+    rclc_publisher_init_default(&joint_pub, &node,
+        ROSIDL_GET_MSG_TYPE_SUPPORT(sensor_msgs, msg, JointState), "/joint_states");
+
+    // Init joint_state arrays
+    rosidl_runtime_c__String__init(&joint_names[0]);
+    rosidl_runtime_c__String__init(&joint_names[1]);
+    rosidl_runtime_c__String__assign(&joint_names[0], "left_wheel_joint");
+    rosidl_runtime_c__String__assign(&joint_names[1], "right_wheel_joint");
+    joint_msg.name.data     = joint_names; joint_msg.name.size     = 2; joint_msg.name.capacity     = 2;
+    joint_msg.position.data = joint_pos;   joint_msg.position.size = 2; joint_msg.position.capacity = 2;
+    joint_msg.velocity.data = joint_vel;   joint_msg.velocity.size = 2; joint_msg.velocity.capacity = 2;
+
+    // Odom frame
+    odom_msg.header.frame_id.data = (char*)"odom";
+    odom_msg.header.frame_id.size = 4;
+    odom_msg.child_frame_id.data  = (char*)"base_link";
+    odom_msg.child_frame_id.size  = 9;
+
+    // Executor
+    rclc_executor_init(&executor, &support.context, 1, &allocator);
+    rclc_executor_add_subscription(&executor, &cmd_sub, &twist_msg,
+                                   &twist_callback, ON_NEW_DATA);
+
+    last_cmd_ms  = millis();
+    last_loop_ms = millis();
+}
+
+// ─────────────────────────────────────────
+// LOOP — runs at 20 Hz
+// ─────────────────────────────────────────
+void loop() {
+    rclc_executor_spin_some(&executor, RCL_MS_TO_NS(5));
+
+    unsigned long now = millis();
+    if (now - last_loop_ms < LOOP_DT_MS) return;
+    float dt = (now - last_loop_ms) / 1000.0f;
+    last_loop_ms = now;
+
+    // ── WATCHDOG ─────────────────────────
+    if (now - last_cmd_ms > CMD_TIMEOUT_MS) {
+        target_left_w = 0.0f;
+        target_right_w = 0.0f;
+    }
+
+    // ── READ ENCODERS ────────────────────
+    noInterrupts();
+    int32_t lc = left_count;
+    int32_t rc = right_count;
+    interrupts();
+
+    int32_t d_left  = lc - left_count_prev;
+    int32_t d_right = rc - right_count_prev;
+    left_count_prev  = lc;
+    right_count_prev = rc;
+
+    // Measured wheel angular velocity (rad/s)
+    float left_w_meas  = (d_left  / TICKS_PER_REV) * 2.0f * PI / dt;
+    float right_w_meas = (d_right / TICKS_PER_REV) * 2.0f * PI / dt;
+
+    // ── PID CONTROL ──────────────────────
+    int pwm_left  = pid_step(target_left_w,  left_w_meas,
+                             left_integral,  left_prev_err,  dt);
+    int pwm_right = pid_step(target_right_w, right_w_meas,
+                             right_integral, right_prev_err, dt);
+
+    Motor_Left(pwm_left);
+    Motor_Right(pwm_right);
+
+    // ── ODOM ─────────────────────────────
+    update_odom(left_w_meas, right_w_meas, dt);
+    rcl_publish(&odom_pub, &odom_msg, NULL);
+
+    // ── JOINT STATES ─────────────────────
+    joint_pos[0] += left_w_meas  * dt;   // accumulated wheel angle
+    joint_pos[1] += right_w_meas * dt;
+    joint_vel[0] = left_w_meas;
+    joint_vel[1] = right_w_meas;
+    rcl_publish(&joint_pub, &joint_msg, NULL);
+}
+Note on header timestamps
+The code above doesn't fill odom_msg.header.stamp — RViz will warn but topic still publishes fine. For production, sync time with the agent and set the stamp. Fine for workshop / bench testing.
