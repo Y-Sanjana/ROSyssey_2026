@@ -281,7 +281,8 @@ void loop() {
     delay(90);
 }
 ```
-
+**what the code does**
+>ESP32 connects to WiFi and listens for movement commands from the Pi, then spins the left and right motors accordingly. It also counts wheel ticks and reads the tilt sensor in the background, but doesn't use that data for anything.
 ---
 
 
@@ -712,6 +713,8 @@ void loop() {
     rcl_publish(&joint_pub, &joint_msg, NULL);
 }
 ```
+**what the code does**
+>ESP32 listens for movement commands and uses wheel-tick feedback to actually hit the requested speed accurately, while constantly reporting back where it has moved. It also stops itself automatically if commands stop arriving.
 
 ### Note on header timestamps
 
