@@ -197,6 +197,7 @@ void loop() {
 ```
 **What the code does-Encoder Tick Test**
 >Reads encoder signals and displays the encoder tick count while the wheels are rotated manually. This helps confirm that the encoders are connected and counting correctly.
+
 **Expected outcome**
 >When the wheels are rotated by hand, the encoder tick counts for the left and right motors are displayed continuously on the Serial Monitor. The counts increase or decrease depending on the direction of wheel rotation, allowing verification that the encoders are working correctly.
 
@@ -392,6 +393,7 @@ void loop() {
 ```
 **what the code does-Motor + Encoder Test**
 >Runs the motors while simultaneously reading encoder data. The program calculates and displays wheel RPM and the number of wheel revolutions, allowing basic motor performance monitoring.
+
 **Expected outcome**
 >The robot moves forward or backward based on the serial command entered (f or b), while continuously reading encoder pulses and displaying encoder counts, estimated RPM, and wheel revolutions on the Serial Monitor. This allows verification of motor movement and encoder feedback, helping determine whether the measured encoder counts match the expected counts per wheel revolution.
 
@@ -668,6 +670,7 @@ void loop() {
 ```
 **What the code does-Encoder Revolution Tracking**
 >Tracks wheel movement in real time and reports progress at quarter, half, three-quarter, and full revolution points. It also keeps a count of the total revolutions completed by each wheel.
+
 **Expected outcome**
 >The robot moves forward or backward based on the serial command while continuously monitoring encoder ticks. As each wheel completes ¼ revolution, ½ revolution, ¾ revolution, and 1 full revolution, milestone messages are printed, and every full revolution is counted and tracked separately for the left and right wheels. The Serial Monitor also displays live encoder counts, estimated RPM, and the total number of completed wheel revolutions
 
