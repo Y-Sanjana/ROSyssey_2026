@@ -23,7 +23,11 @@
 ![DRV8833 Pinout](drv8833_pinout.jpeg)
 
 ---
+### Motor Driver Wiring
 
+![Motor Driver Wiring](motor_driver_wiring.jpeg)
+
+---
 ## Encoder wiring 
 
 ![Encoder wiring](wiring_diagram.jpeg)
