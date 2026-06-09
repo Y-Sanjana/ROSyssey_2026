@@ -26,7 +26,7 @@
 
 ## Full Wiring Diagram
 
-![Full Wiring Diagram](wiring_diagram.jpeg)
+![Encoder wiring](wiring_diagram.jpeg)
 
 ---
 
