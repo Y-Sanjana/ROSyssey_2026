@@ -4,7 +4,7 @@
 
 ## System Overview
 
-![System Block Diagram](system_block_diagram.jpeg)
+![System Block Diagram](system design.jpeg)
 
 ---
 
