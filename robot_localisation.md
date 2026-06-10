@@ -24,7 +24,7 @@ ESP32 <---- USB Serial ----> Raspberry Pi 3
 
 ## Build ROS2 workspace
 ```bash
-git clone https://github.com/Y-Sanjana/Robot_localisation.git nav_Ws
+git clone https://github.com/Y-Sanjana/Robot_localisation.git nav_ws
 
 cd ~/nav_ws
 
