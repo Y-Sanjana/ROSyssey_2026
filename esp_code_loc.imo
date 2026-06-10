@@ -1,0 +1,601 @@
+
+// ═══════════════════════════════════════════════════════════════
+//  ESP32 micro-ROS Differential Drive Rover
+//  SERIAL micro-ROS VERSION
+//
+//  RPi3 <---- USB SERIAL ----> ESP32
+//
+//  Subscribes:
+//      /cmd_vel
+//
+//  Publishes:
+//      /wheel/odom
+//      /imu/data
+//      /joint_states
+// ═══════════════════════════════════════════════════════════════
+
+#include <micro_ros_arduino.h>
+
+#include <rcl/rcl.h>
+#include <rclc/rclc.h>
+#include <rclc/executor.h>
+
+#include <geometry_msgs/msg/twist.h>
+#include <nav_msgs/msg/odometry.h>
+#include <sensor_msgs/msg/joint_state.h>
+#include <sensor_msgs/msg/imu.h>
+
+#include <rosidl_runtime_c/string_functions.h>
+
+#include <Wire.h>
+#include <math.h>
+
+// ─────────────────────────────────────────
+// MOTOR PINS
+// ─────────────────────────────────────────
+#define RIGHT_IN1   25
+#define RIGHT_IN2   26
+
+#define LEFT_IN1    27
+#define LEFT_IN2    14
+
+// ─────────────────────────────────────────
+// ENCODERS
+// ─────────────────────────────────────────
+#define LEFT_ENC_A  34
+#define LEFT_ENC_B  35
+
+#define RIGHT_ENC_A 32
+#define RIGHT_ENC_B 33
+
+// ─────────────────────────────────────────
+// MPU6050
+// ─────────────────────────────────────────
+#define MPU_ADDR 0x68
+
+#define SDA_PIN 13
+#define SCL_PIN 12
+
+// ─────────────────────────────────────────
+// PWM
+// ─────────────────────────────────────────
+#define PWM_FREQ    1000
+#define PWM_RES     10
+
+// ─────────────────────────────────────────
+// ROBOT PARAMETERS
+// ─────────────────────────────────────────
+#define WHEEL_RADIUS   0.0325f
+#define WHEELBASE      0.16f
+
+#define TICKS_PER_REV  840.0f
+
+// PID
+#define KP  200.0f
+#define KI   50.0f
+#define KD    5.0f
+
+#define LOOP_DT_MS     50
+#define CMD_TIMEOUT_MS 500
+
+// ─────────────────────────────────────────
+// GLOBALS
+// ─────────────────────────────────────────
+volatile int32_t left_count = 0;
+volatile int32_t right_count = 0;
+
+int32_t left_prev = 0;
+int32_t right_prev = 0;
+
+float target_left_w = 0.0f;
+float target_right_w = 0.0f;
+
+float left_integral = 0.0f;
+float right_integral = 0.0f;
+
+float left_prev_err = 0.0f;
+float right_prev_err = 0.0f;
+
+float pose_x = 0.0f;
+float pose_y = 0.0f;
+float pose_th = 0.0f;
+
+unsigned long last_cmd_ms = 0;
+unsigned long last_loop_ms = 0;
+
+// ─────────────────────────────────────────
+// MPU6050 VARIABLES
+// ─────────────────────────────────────────
+int16_t AccX, AccY, AccZ;
+int16_t GyroX, GyroY, GyroZ;
+
+float ax, ay, az;
+float gx, gy, gz;
+
+// ─────────────────────────────────────────
+// micro-ROS
+// ─────────────────────────────────────────
+rcl_node_t node;
+
+rcl_subscription_t cmd_sub;
+
+rcl_publisher_t odom_pub;
+rcl_publisher_t joint_pub;
+rcl_publisher_t imu_pub;
+
+rclc_executor_t executor;
+rclc_support_t support;
+rcl_allocator_t allocator;
+
+geometry_msgs__msg__Twist twist_msg;
+nav_msgs__msg__Odometry odom_msg;
+sensor_msgs__msg__JointState joint_msg;
+sensor_msgs__msg__Imu imu_msg;
+
+// Joint arrays
+double joint_pos[2] = {0.0, 0.0};
+double joint_vel[2] = {0.0, 0.0};
+
+rosidl_runtime_c__String joint_names[2];
+
+// ─────────────────────────────────────────
+// ENCODER ISRs
+// ─────────────────────────────────────────
+void IRAM_ATTR leftEncoderISR()
+{
+    if (digitalRead(LEFT_ENC_B))
+        left_count++;
+    else
+        left_count--;
+}
+
+void IRAM_ATTR rightEncoderISR()
+{
+    if (digitalRead(RIGHT_ENC_B))
+        right_count++;
+    else
+        right_count--;
+}
+
+// ─────────────────────────────────────────
+// MOTOR CONTROL
+// ─────────────────────────────────────────
+void Motor_Left(int pwm)
+{
+    pwm = constrain(pwm, -1023, 1023);
+
+    if (pwm > 0)
+    {
+        ledcAttach(LEFT_IN1, PWM_FREQ, PWM_RES);
+        ledcWrite(LEFT_IN1, pwm);
+
+        digitalWrite(LEFT_IN2, LOW);
+    }
+    else if (pwm < 0)
+    {
+        ledcAttach(LEFT_IN2, PWM_FREQ, PWM_RES);
+        ledcWrite(LEFT_IN2, -pwm);
+
+        digitalWrite(LEFT_IN1, LOW);
+    }
+    else
+    {
+        ledcDetach(LEFT_IN1);
+        ledcDetach(LEFT_IN2);
+
+        digitalWrite(LEFT_IN1, LOW);
+        digitalWrite(LEFT_IN2, LOW);
+    }
+}
+
+void Motor_Right(int pwm)
+{
+    pwm = constrain(pwm, -1023, 1023);
+
+    if (pwm > 0)
+    {
+        ledcAttach(RIGHT_IN1, PWM_FREQ, PWM_RES);
+        ledcWrite(RIGHT_IN1, pwm);
+
+        digitalWrite(RIGHT_IN2, LOW);
+    }
+    else if (pwm < 0)
+    {
+        ledcAttach(RIGHT_IN2, PWM_FREQ, PWM_RES);
+        ledcWrite(RIGHT_IN2, -pwm);
+
+        digitalWrite(RIGHT_IN1, LOW);
+    }
+    else
+    {
+        ledcDetach(RIGHT_IN1);
+        ledcDetach(RIGHT_IN2);
+
+        digitalWrite(RIGHT_IN1, LOW);
+        digitalWrite(RIGHT_IN2, LOW);
+    }
+}
+
+// ─────────────────────────────────────────
+// MPU6050
+// ─────────────────────────────────────────
+void MPU6050_Init()
+{
+    Wire.beginTransmission(MPU_ADDR);
+    Wire.write(0x6B);
+    Wire.write(0x00);
+    Wire.endTransmission();
+}
+
+void MPU6050_Read()
+{
+    Wire.beginTransmission(MPU_ADDR);
+    Wire.write(0x3B);
+    Wire.endTransmission(false);
+
+    Wire.requestFrom(MPU_ADDR, 14, true);
+
+    AccX = Wire.read() << 8 | Wire.read();
+    AccY = Wire.read() << 8 | Wire.read();
+    AccZ = Wire.read() << 8 | Wire.read();
+
+    Wire.read();
+    Wire.read();
+
+    GyroX = Wire.read() << 8 | Wire.read();
+    GyroY = Wire.read() << 8 | Wire.read();
+    GyroZ = Wire.read() << 8 | Wire.read();
+
+    ax = AccX / 16384.0;
+    ay = AccY / 16384.0;
+    az = AccZ / 16384.0;
+
+    gx = GyroX / 131.0;
+    gy = GyroY / 131.0;
+    gz = GyroZ / 131.0;
+}
+
+// ─────────────────────────────────────────
+// CMD_VEL CALLBACK
+// ─────────────────────────────────────────
+void twist_callback(const void *msg_in)
+{
+    const geometry_msgs__msg__Twist *msg =
+        (const geometry_msgs__msg__Twist *)msg_in;
+
+    float v = msg->linear.x;
+    float w = msg->angular.z;
+
+    float v_left = v - (w * WHEELBASE / 2.0f);
+    float v_right = v + (w * WHEELBASE / 2.0f);
+
+    target_left_w = v_left / WHEEL_RADIUS;
+    target_right_w = v_right / WHEEL_RADIUS;
+
+    last_cmd_ms = millis();
+}
+
+// ─────────────────────────────────────────
+// PID
+// ─────────────────────────────────────────
+int pid_step(float target,
+             float measured,
+             float &integral,
+             float &prev_err,
+             float dt)
+{
+    float err = target - measured;
+
+    integral += err * dt;
+
+    integral = constrain(integral, -5.0f, 5.0f);
+
+    float deriv = (err - prev_err) / dt;
+
+    prev_err = err;
+
+    float out =
+        KP * err +
+        KI * integral +
+        KD * deriv;
+
+    return constrain(out, -1023, 1023);
+}
+
+// ─────────────────────────────────────────
+// ODOMETRY
+// ─────────────────────────────────────────
+void update_odom(float left_w,
+                 float right_w,
+                 float dt)
+{
+    float v_left = left_w * WHEEL_RADIUS;
+    float v_right = right_w * WHEEL_RADIUS;
+
+    float v = (v_left + v_right) / 2.0f;
+
+    float w = (v_right - v_left) / WHEELBASE;
+
+    pose_th += w * dt;
+
+    pose_x += v * cosf(pose_th) * dt;
+    pose_y += v * sinf(pose_th) * dt;
+
+    odom_msg.pose.pose.position.x = pose_x;
+    odom_msg.pose.pose.position.y = pose_y;
+
+    odom_msg.pose.pose.orientation.z =
+        sinf(pose_th / 2.0f);
+
+    odom_msg.pose.pose.orientation.w =
+        cosf(pose_th / 2.0f);
+
+    odom_msg.twist.twist.linear.x = v;
+    odom_msg.twist.twist.angular.z = w;
+}
+
+// ─────────────────────────────────────────
+// SETUP
+// ─────────────────────────────────────────
+void setup()
+{
+    Serial.begin(115200);
+
+    // SERIAL micro-ROS transport
+    set_microros_transports();
+
+    delay(2000);
+
+    // Motor pins
+    pinMode(LEFT_IN1, OUTPUT);
+    pinMode(LEFT_IN2, OUTPUT);
+
+    pinMode(RIGHT_IN1, OUTPUT);
+    pinMode(RIGHT_IN2, OUTPUT);
+
+    // Encoder pins
+    pinMode(LEFT_ENC_A, INPUT_PULLUP);
+    pinMode(LEFT_ENC_B, INPUT_PULLUP);
+
+    pinMode(RIGHT_ENC_A, INPUT_PULLUP);
+    pinMode(RIGHT_ENC_B, INPUT_PULLUP);
+
+    // Encoder interrupts
+    attachInterrupt(
+        digitalPinToInterrupt(LEFT_ENC_A),
+        leftEncoderISR,
+        RISING
+    );
+
+    attachInterrupt(
+        digitalPinToInterrupt(RIGHT_ENC_A),
+        rightEncoderISR,
+        RISING
+    );
+
+    // I2C
+    Wire.begin(SDA_PIN, SCL_PIN);
+
+    MPU6050_Init();
+
+    // micro-ROS init
+    allocator = rcl_get_default_allocator();
+
+    rclc_support_init(
+        &support,
+        0,
+        NULL,
+        &allocator
+    );
+
+    rclc_node_init_default(
+        &node,
+        "esp32_rover",
+        "",
+        &support
+    );
+
+    // /cmd_vel subscriber
+    rclc_subscription_init_default(
+        &cmd_sub,
+        &node,
+        ROSIDL_GET_MSG_TYPE_SUPPORT(
+            geometry_msgs,
+            msg,
+            Twist
+        ),
+        "/cmd_vel"
+    );
+
+    // /wheel/odom publisher
+    rclc_publisher_init_default(
+        &odom_pub,
+        &node,
+        ROSIDL_GET_MSG_TYPE_SUPPORT(
+            nav_msgs,
+            msg,
+            Odometry
+        ),
+        "/wheel/odom"
+    );
+
+    // /imu/data publisher
+    rclc_publisher_init_default(
+        &imu_pub,
+        &node,
+        ROSIDL_GET_MSG_TYPE_SUPPORT(
+            sensor_msgs,
+            msg,
+            Imu
+        ),
+        "/imu/data"
+    );
+
+    // /joint_states publisher
+    rclc_publisher_init_default(
+        &joint_pub,
+        &node,
+        ROSIDL_GET_MSG_TYPE_SUPPORT(
+            sensor_msgs,
+            msg,
+            JointState
+        ),
+        "/joint_states"
+    );
+
+    // Joint names
+    rosidl_runtime_c__String__init(&joint_names[0]);
+    rosidl_runtime_c__String__init(&joint_names[1]);
+
+    rosidl_runtime_c__String__assign(
+        &joint_names[0],
+        "left_wheel_joint"
+    );
+
+    rosidl_runtime_c__String__assign(
+        &joint_names[1],
+        "right_wheel_joint"
+    );
+
+    joint_msg.name.data = joint_names;
+    joint_msg.name.size = 2;
+    joint_msg.name.capacity = 2;
+
+    joint_msg.position.data = joint_pos;
+    joint_msg.position.size = 2;
+    joint_msg.position.capacity = 2;
+
+    joint_msg.velocity.data = joint_vel;
+    joint_msg.velocity.size = 2;
+    joint_msg.velocity.capacity = 2;
+
+    // Executor
+    rclc_executor_init(
+        &executor,
+        &support.context,
+        1,
+        &allocator
+    );
+
+    rclc_executor_add_subscription(
+        &executor,
+        &cmd_sub,
+        &twist_msg,
+        &twist_callback,
+        ON_NEW_DATA
+    );
+
+    last_cmd_ms = millis();
+    last_loop_ms = millis();
+}
+
+// ─────────────────────────────────────────
+// LOOP
+// ─────────────────────────────────────────
+void loop()
+{
+    rclc_executor_spin_some(
+        &executor,
+        RCL_MS_TO_NS(5)
+    );
+
+    unsigned long now = millis();
+
+    if (now - last_loop_ms < LOOP_DT_MS)
+        return;
+
+    float dt =
+        (now - last_loop_ms) / 1000.0f;
+
+    last_loop_ms = now;
+
+    // Watchdog
+    if (now - last_cmd_ms > CMD_TIMEOUT_MS)
+    {
+        target_left_w = 0.0f;
+        target_right_w = 0.0f;
+    }
+
+    // Read IMU
+    MPU6050_Read();
+
+    // Read encoders
+    noInterrupts();
+
+    int32_t lc = left_count;
+    int32_t rc = right_count;
+
+    interrupts();
+
+    int32_t d_left = lc - left_prev;
+    int32_t d_right = rc - right_prev;
+
+    left_prev = lc;
+    right_prev = rc;
+
+    // Wheel velocity
+    float left_w =
+        (d_left / TICKS_PER_REV) *
+        2.0f * PI / dt;
+
+    float right_w =
+        (d_right / TICKS_PER_REV) *
+        2.0f * PI / dt;
+
+    // PID
+    int pwm_left =
+        pid_step(
+            target_left_w,
+            left_w,
+            left_integral,
+            left_prev_err,
+            dt
+        );
+
+    int pwm_right =
+        pid_step(
+            target_right_w,
+            right_w,
+            right_integral,
+            right_prev_err,
+            dt
+        );
+
+    Motor_Left(pwm_left);
+    Motor_Right(pwm_right);
+
+    // Odom
+    update_odom(left_w, right_w, dt);
+
+    rcl_publish(
+        &odom_pub,
+        &odom_msg,
+        NULL
+    );
+
+    // IMU
+    imu_msg.angular_velocity.z = gz;
+
+    imu_msg.linear_acceleration.x = ax;
+    imu_msg.linear_acceleration.y = ay;
+    imu_msg.linear_acceleration.z = az;
+
+    rcl_publish(
+        &imu_pub,
+        &imu_msg,
+        NULL
+    );
+
+    // Joint states
+    joint_pos[0] += left_w * dt;
+    joint_pos[1] += right_w * dt;
+
+    joint_vel[0] = left_w;
+    joint_vel[1] = right_w;
+
+    rcl_publish(
+        &joint_pub,
+        &joint_msg,
+        NULL
+    );
+}
