@@ -31,52 +31,44 @@ Open `teleop_code.ino` and update these three lines:
 #include <rclc/rclc.h>
 #include <rclc/executor.h>
 #include <geometry_msgs/msg/twist.h>
-#include <Wire.h>
 
 // ─────────────────────────────────────────
 // PIN CONFIGURATION
 // ─────────────────────────────────────────
 
-// DRV8833: IN1,IN2 → Right motor
-#define RIGHT_IN1   25    // D21
-#define RIGHT_IN2   26    // D19
+// DRV8833 → Left motor
+#define LEFT_IN1    27
+#define LEFT_IN2    14
 
-// DRV8833: IN3,IN4 → Left motor
-#define LEFT_IN1    27    // D4
-#define LEFT_IN2    14    // D2
+// DRV8833 → Right motor
+#define RIGHT_IN1   25
+#define RIGHT_IN2   26
 
 // Left Encoder
-#define LEFT_ENC_A  27    // D27 (C1) — interrupt
-#define LEFT_ENC_B  26    // D26 (C2) — direction
+#define LEFT_ENC_A  32    // interrupt
+#define LEFT_ENC_B  33    // direction
 
 // Right Encoder
-#define RIGHT_ENC_A 25    // D25 (C1) — interrupt
-#define RIGHT_ENC_B 33    // D33 (C2) — direction
-
-// I2C MPU6050
-#define SDA_PIN     13    // D13
-#define SCL_PIN     14    // D14
+#define RIGHT_ENC_A 34    // interrupt (input-only, needs external pull-up)
+#define RIGHT_ENC_B 35    // direction (input-only, needs external pull-up)
 
 // ─────────────────────────────────────────
-// WiFi credentials for micro-ROS agent
+// WiFi / Agent
 // ─────────────────────────────────────────
-#define WIFI_SSID   "astra8"      // ← CHANGE
-#define WIFI_PASS   "12345678"  // ← CHANGE
-#define AGENT_IP    ""       // ← CHANGE to your PC IP
+#define WIFI_SSID   "astra8"
+#define WIFI_PASS   "12345678"
+#define AGENT_IP    "10.54.230.39"
 #define AGENT_PORT  8888
 
 // ─────────────────────────────────────────
-// LEDC PWM  (v3 API — no ledcSetup)
+// PWM  (v3 API — no ledcSetup)
 // ─────────────────────────────────────────
-#define LEFT_CH     0
-#define RIGHT_CH    1
 #define PWM_FREQ    1000
-#define PWM_RES     10    // 10-bit → 0–1023
+#define PWM_RES     10      // 10-bit → 0–1023
 
-// MPU6050
-#define MPU_ADDR    0x68
-
+// ─────────────────────────────────────────
 // Drive params
+// ─────────────────────────────────────────
 #define WHEELBASE   0.16
 #define VEL_SCALE   800.0
 
@@ -86,21 +78,12 @@ Open `teleop_code.ino` and update these three lines:
 volatile int32_t left_count  = 0;
 volatile int32_t right_count = 0;
 
-float linear_x_cmd  = 0.0;
-float angular_z_cmd = 0.0;
-
 rcl_node_t         node;
 rcl_subscription_t sub;
 rclc_executor_t    executor;
 rclc_support_t     support;
 rcl_allocator_t    allocator;
 geometry_msgs__msg__Twist twist_msg;
-
-int16_t AccX, AccY, AccZ;
-int16_t GyroX, GyroY, GyroZ;
-float   Ax, Ay, Az;
-float   Gx, Gy, Gz;
-float   angleX, angleY;
 
 // ─────────────────────────────────────────
 // ENCODER ISRs
@@ -111,46 +94,46 @@ void IRAM_ATTR leftEncoderISR() {
 }
 
 void IRAM_ATTR rightEncoderISR() {
-    if (digitalRead(RIGHT_ENC_B)) right_count++;
-    else                          right_count--;
+    if (digitalRead(RIGHT_ENC_B)) right_count--;
+    else                          right_count++;
 }
 
 // ─────────────────────────────────────────
-// MOTOR FUNCTIONS  (v3 API: ledcAttach with 3 args)
+// MOTOR FUNCTIONS
 // ─────────────────────────────────────────
 void Motor_Left(int speed) {
     speed = constrain(speed, -1023, 1023);
     if (speed > 0) {
-        ledcAttach(LEFT_IN1, PWM_FREQ, PWM_RES);  // PWM on D4
+        ledcAttach(LEFT_IN1, PWM_FREQ, PWM_RES);
         ledcWrite(LEFT_IN1, speed);
-        digitalWrite(LEFT_IN2, LOW);               // D2 = LOW
+        digitalWrite(LEFT_IN2, LOW);
     } else if (speed < 0) {
-        ledcAttach(LEFT_IN2, PWM_FREQ, PWM_RES);  // PWM on D2
+        ledcAttach(LEFT_IN2, PWM_FREQ, PWM_RES);
         ledcWrite(LEFT_IN2, -speed);
-        digitalWrite(LEFT_IN1, LOW);               // D4 = LOW
+        digitalWrite(LEFT_IN1, LOW);
     } else {
         ledcDetach(LEFT_IN1);
         ledcDetach(LEFT_IN2);
         digitalWrite(LEFT_IN1, LOW);
-        digitalWrite(LEFT_IN2, LOW);               // coast
+        digitalWrite(LEFT_IN2, LOW);
     }
 }
 
 void Motor_Right(int speed) {
     speed = constrain(speed, -1023, 1023);
     if (speed > 0) {
-        ledcAttach(RIGHT_IN1, PWM_FREQ, PWM_RES); // PWM on D21
+        ledcAttach(RIGHT_IN1, PWM_FREQ, PWM_RES);
         ledcWrite(RIGHT_IN1, speed);
-        digitalWrite(RIGHT_IN2, LOW);              // D19 = LOW
+        digitalWrite(RIGHT_IN2, LOW);
     } else if (speed < 0) {
-        ledcAttach(RIGHT_IN2, PWM_FREQ, PWM_RES); // PWM on D19
+        ledcAttach(RIGHT_IN2, PWM_FREQ, PWM_RES);
         ledcWrite(RIGHT_IN2, -speed);
-        digitalWrite(RIGHT_IN1, LOW);              // D21 = LOW
+        digitalWrite(RIGHT_IN1, LOW);
     } else {
         ledcDetach(RIGHT_IN1);
         ledcDetach(RIGHT_IN2);
         digitalWrite(RIGHT_IN1, LOW);
-        digitalWrite(RIGHT_IN2, LOW);              // coast
+        digitalWrite(RIGHT_IN2, LOW);
     }
 }
 
@@ -159,10 +142,10 @@ void Motor_Stop() {
     ledcDetach(LEFT_IN2);
     ledcDetach(RIGHT_IN1);
     ledcDetach(RIGHT_IN2);
-    digitalWrite(LEFT_IN1,  HIGH);  // D4  — brake
-    digitalWrite(LEFT_IN2,  HIGH);  // D2
-    digitalWrite(RIGHT_IN1, HIGH);  // D21
-    digitalWrite(RIGHT_IN2, HIGH);  // D19
+    digitalWrite(LEFT_IN1,  HIGH);
+    digitalWrite(LEFT_IN2,  HIGH);
+    digitalWrite(RIGHT_IN1, HIGH);
+    digitalWrite(RIGHT_IN2, HIGH);
 }
 
 // ─────────────────────────────────────────
@@ -172,53 +155,14 @@ void twist_callback(const void* msg_in) {
     const geometry_msgs__msg__Twist* msg =
         (const geometry_msgs__msg__Twist*)msg_in;
 
-    linear_x_cmd  = msg->linear.x;
-    angular_z_cmd = msg->angular.z;
+    float linear_x  = msg->linear.x;
+    float angular_z = msg->angular.z;
 
-    float v_left  = linear_x_cmd - (angular_z_cmd * WHEELBASE / 2.0);
-    float v_right = linear_x_cmd + (angular_z_cmd * WHEELBASE / 2.0);
+    float v_left  = linear_x - (angular_z * WHEELBASE / 2.0);
+    float v_right = linear_x + (angular_z * WHEELBASE / 2.0);
 
     Motor_Left ((int)(v_left  * VEL_SCALE));
     Motor_Right((int)(v_right * VEL_SCALE));
-}
-
-// ─────────────────────────────────────────
-// MPU6050
-// ─────────────────────────────────────────
-void MPU6050_Init() {
-    Wire.beginTransmission(MPU_ADDR);
-    Wire.write(0x6B);
-    Wire.write(0x00);
-    Wire.endTransmission();
-}
-
-void MPU6050_Read() {
-    Wire.beginTransmission(MPU_ADDR);
-    Wire.write(0x3B);
-    Wire.endTransmission(false);
-    Wire.requestFrom(MPU_ADDR, 14, true);
-
-    AccX  = Wire.read() << 8 | Wire.read();
-    AccY  = Wire.read() << 8 | Wire.read();
-    AccZ  = Wire.read() << 8 | Wire.read();
-    Wire.read(); Wire.read();               // skip temp
-    GyroX = Wire.read() << 8 | Wire.read();
-    GyroY = Wire.read() << 8 | Wire.read();
-    GyroZ = Wire.read() << 8 | Wire.read();
-}
-
-void MPU6050_Convert() {
-    Ax = AccX  / 16384.0;
-    Ay = AccY  / 16384.0;
-    Az = AccZ  / 16384.0;
-    Gx = GyroX / 131.0;
-    Gy = GyroY / 131.0;
-    Gz = GyroZ / 131.0;
-}
-
-void MPU6050_Angle() {
-    angleX = atan2(Ay, Az) * 57.3;
-    angleY = atan2(Ax, Az) * 57.3;
 }
 
 // ─────────────────────────────────────────
@@ -227,28 +171,23 @@ void MPU6050_Angle() {
 void setup() {
     Serial.begin(115200);
 
-    // micro-ROS over WiFi
     set_microros_wifi_transports(WIFI_SSID, WIFI_PASS, AGENT_IP, AGENT_PORT);
     delay(2000);
 
     // Motor pins
-    pinMode(LEFT_IN1,  OUTPUT);  // D4
-    pinMode(LEFT_IN2,  OUTPUT);  // D2
-    pinMode(RIGHT_IN1, OUTPUT);  // D21
-    pinMode(RIGHT_IN2, OUTPUT);  // D19
+    pinMode(LEFT_IN1,  OUTPUT);
+    pinMode(LEFT_IN2,  OUTPUT);
+    pinMode(RIGHT_IN1, OUTPUT);
+    pinMode(RIGHT_IN2, OUTPUT);
     Motor_Stop();
 
-    // Encoder interrupts
-    pinMode(LEFT_ENC_A,  INPUT_PULLUP);  // D27
-    pinMode(LEFT_ENC_B,  INPUT_PULLUP);  // D26
-    pinMode(RIGHT_ENC_A, INPUT_PULLUP);  // D25
-    pinMode(RIGHT_ENC_B, INPUT_PULLUP);  // D33
+    // Encoder pins
+    pinMode(LEFT_ENC_A,  INPUT_PULLUP);
+    pinMode(LEFT_ENC_B,  INPUT_PULLUP);
+    pinMode(RIGHT_ENC_A, INPUT_PULLUP);  // no effect on GPIO 34 — needs external pull-up
+    pinMode(RIGHT_ENC_B, INPUT_PULLUP);  // no effect on GPIO 35 — needs external pull-up
     attachInterrupt(digitalPinToInterrupt(LEFT_ENC_A),  leftEncoderISR,  RISING);
     attachInterrupt(digitalPinToInterrupt(RIGHT_ENC_A), rightEncoderISR, RISING);
-
-    // I2C + MPU6050
-    Wire.begin(SDA_PIN, SCL_PIN);   // D13, D14
-    MPU6050_Init();
 
     // micro-ROS init
     allocator = rcl_get_default_allocator();
@@ -271,10 +210,6 @@ void setup() {
 // LOOP
 // ─────────────────────────────────────────
 void loop() {
-    MPU6050_Read();
-    MPU6050_Convert();
-    MPU6050_Angle();
-
     rclc_executor_spin_some(&executor, RCL_MS_TO_NS(10));
     delay(90);
 }
