@@ -44,13 +44,7 @@ source ~/nav_ws/install/setup.bash
 
 ---
 
-# Cleaning Workspace
 
-```bash
-cd ~/nav_ws
-
-rm -rf build install log
-```
 
 ---
 
