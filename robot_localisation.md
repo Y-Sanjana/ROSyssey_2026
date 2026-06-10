@@ -40,6 +40,8 @@ colcon build --symlink-install
 source /opt/ros/humble/setup.bash
 
 source ~/nav_ws/install/setup.bash
+
+sudo apt install ros-humble-robot-localization
 ```
 
 ---
