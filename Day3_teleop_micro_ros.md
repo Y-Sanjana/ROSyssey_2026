@@ -19,8 +19,6 @@ micro-ROS node on ESP32. Subscribes to `/cmd_vel` over WiFi UDP and drives a dif
 | MPU-6050 SDA | 13 |
 | MPU-6050 SCL | 14 |
 
-> ⚠️ **Pin conflicts exist in this version** — GPIO 25/26/27 are shared between motor driver and encoders, and GPIO 14 is shared between LEFT_IN2 and SCL. Fix before deploying.
-
 ---
 
 ## Step 0 — Edit credentials before flashing
