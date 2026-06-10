@@ -23,11 +23,9 @@ ESP32 <---- USB Serial ----> Raspberry Pi 3
 # Workspace Build
 
 ## Build ROS2 workspace
-```bash
-git clone https://github.com/Y-Sanjana/Robot_localisation.git nav_Ws
-```
 
-```bash
+git clone https://github.com/Y-Sanjana/Robot_localisation.git nav_Ws
+
 cd ~/nav_ws
 
 colcon build --symlink-install
