@@ -28,6 +28,9 @@ git clone https://github.com/Y-Sanjana/Robot_localisation.git nav_ws
 
 cd ~/nav_ws
 
+sudo ap update
+sudo apt install python3-colcon-common-extensions
+
 colcon build --symlink-install
 ```
 
